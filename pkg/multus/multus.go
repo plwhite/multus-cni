@@ -575,6 +575,7 @@ func CmdAdd(args *skel.CmdArgs, exec invoke.Exec, kubeClient *k8s.ClientInfo) (c
 		}
 	}
 
+	// plw this reads the pod
 	pod, err := GetPod(kubeClient, k8sArgs, false)
 	if err != nil {
 		return nil, err
@@ -593,6 +594,7 @@ func CmdAdd(args *skel.CmdArgs, exec invoke.Exec, kubeClient *k8s.ClientInfo) (c
 		n.Delegates[0].MasterPlugin = true
 	}
 
+	// plw this is where the delegates get loaded - probably changes purely down in this method
 	_, kc, err := k8s.TryLoadPodDelegates(pod, n, kubeClient, resourceMap)
 	if err != nil {
 		return nil, cmdErr(k8sArgs, "error loading k8s delegates k8s args: %v", err)

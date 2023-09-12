@@ -24,7 +24,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
-
+	
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -35,6 +35,8 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog"
+	// plw added this
+	v1alpha1 "k8s.io/api/networking/v1alpha1"
 
 	"github.com/containernetworking/cni/libcni"
 	"github.com/containernetworking/cni/pkg/skel"
@@ -79,6 +81,13 @@ func (c *ClientInfo) GetPod(namespace, name string) (*v1.Pod, error) {
 // DeletePod deletes a pod from kubernetes
 func (c *ClientInfo) DeletePod(namespace, name string) error {
 	return c.Client.CoreV1().Pods(namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
+}
+
+// plw - changes here that should be tidied
+// The extra "resource" in the name is because there is another GetPodNetwork function.
+// GetPodNetworkResource gets pod network from kubernetes
+func (c *ClientInfo) GetPodNetworkResource(name string) (*v1alpha1.PodNetwork, error) {
+	return c.Client.NetworkingV1alpha1().PodNetworks().Get(context.TODO(), name, metav1.GetOptions{})
 }
 
 // AddNetAttachDef adds net-attach-def into kubernetes
@@ -180,6 +189,35 @@ func parsePodNetworkObjectName(podnetwork string) (string, string, string, error
 
 	logging.Debugf("parsePodNetworkObjectName: parsed: %s, %s, %s", netNsName, networkName, netIfName)
 	return netNsName, networkName, netIfName, nil
+}
+
+// plw CHANGE IN PROGRESS
+func parseNetworksFromPod(client *ClientInfo, networksFromPod []v1.Network, defaultNamespace string) ([]*types.NetworkSelectionElement, error) {	
+	var networks []*types.NetworkSelectionElement
+
+	for _, n := range networksFromPod {
+		// plw - ignoring the default gateway stuff for now.
+		if n.PodNetworkName != "" {
+			logging.Errorf("Found pod network name: %s", n.PodNetworkName)
+
+			podNetwork, err := client.GetPodNetworkResource(n.PodNetworkName)
+			if err != nil {
+				return nil, err
+			}
+
+			// plw - FIXME; there is no validation here at all			
+			networks = append(networks, &types.NetworkSelectionElement{
+				Name:             podNetwork.Spec.ParametersRefs[0].Name,
+				Namespace:        podNetwork.Spec.ParametersRefs[0].Namespace,
+				InterfaceRequest: n.InterfaceName,
+			})
+		} else {
+			// plw - just ignoring PodNetworkAttachmentName here.
+			logging.Errorf("Found pod network attachment name: %s", n.PodNetworkAttachmentName)
+		}
+	}
+	
+	return networks, nil
 }
 
 func parsePodNetworkAnnotation(podNetworks, defaultNamespace string) ([]*types.NetworkSelectionElement, error) {
@@ -352,7 +390,7 @@ func TryLoadPodDelegates(pod *v1.Pod, conf *types.NetConf, clientInfo *ClientInf
 		conf.Delegates[0] = delegate
 	}
 
-	networks, err := GetPodNetwork(pod)
+	networks, err := GetPodNetwork(clientInfo, pod)
 	if networks != nil {
 		delegates, err := GetNetworkDelegates(clientInfo, pod, networks, conf, resourceMap)
 
@@ -470,21 +508,35 @@ func NewClientInfo(config *rest.Config) (*ClientInfo, error) {
 }
 
 // GetPodNetwork gets net-attach-def annotation from pod
-func GetPodNetwork(pod *v1.Pod) ([]*types.NetworkSelectionElement, error) {
+func GetPodNetwork(client *ClientInfo, pod *v1.Pod) ([]*types.NetworkSelectionElement, error) {
 	logging.Debugf("GetPodNetwork: %v", pod)
-
+	
 	netAnnot := pod.Annotations[networkAttachmentAnnot]
 	defaultNamespace := pod.ObjectMeta.Namespace
 
-	if len(netAnnot) == 0 {
-		return nil, &NoK8sNetworkError{"no kubernetes network found"}
+	// plw - changed so that if there are no annotations we still proceed
+	if len(netAnnot) != 0 {
+	    networks, err := parsePodNetworkAnnotation(netAnnot, defaultNamespace)
+		if err != nil {
+			return nil, err
+		}
+
+		return networks, nil
 	}
 
-	networks, err := parsePodNetworkAnnotation(netAnnot, defaultNamespace)
-	if err != nil {
-		return nil, err
+	// plw - new call to parse the networks from the pod.
+	networksFromPod := pod.Spec.Networks
+	if networksFromPod != nil && len(networksFromPod) != 0 {
+		logging.Debugf("We have pod networks in the pod to parse")
+	    networks, err := parseNetworksFromPod(client, networksFromPod, defaultNamespace)
+		if err != nil {
+			return nil, err
+		}
+
+		return networks, nil
 	}
-	return networks, nil
+
+	return nil, &NoK8sNetworkError{"no kubernetes network found"}
 }
 
 // GetNetworkDelegates returns delegatenetconf from net-attach-def annotation in pod
