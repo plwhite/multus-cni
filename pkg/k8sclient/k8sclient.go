@@ -90,6 +90,11 @@ func (c *ClientInfo) GetPodNetworkResource(name string) (*v1alpha1.PodNetwork, e
 	return c.Client.NetworkingV1alpha1().PodNetworks().Get(context.TODO(), name, metav1.GetOptions{})
 }
 
+// GetPodNetworkAttachment gets pod network attachment kubernetes
+func (c *ClientInfo) GetPodNetworkAttachment(namespace, name string) (*v1alpha1.PodNetworkAttachment, error) {
+	return c.Client.NetworkingV1alpha1().PodNetworkAttachments(namespace).Get(context.TODO(), name, metav1.GetOptions{})
+}
+
 // AddNetAttachDef adds net-attach-def into kubernetes
 func (c *ClientInfo) AddNetAttachDef(netattach *nettypes.NetworkAttachmentDefinition) (*nettypes.NetworkAttachmentDefinition, error) {
 	return c.NetClient.NetworkAttachmentDefinitions(netattach.ObjectMeta.Namespace).Create(context.TODO(), netattach, metav1.CreateOptions{})
@@ -191,21 +196,37 @@ func parsePodNetworkObjectName(podnetwork string) (string, string, string, error
 	return netNsName, networkName, netIfName, nil
 }
 
-// plw CHANGE IN PROGRESS
-func parseNetworksFromPod(client *ClientInfo, networksFromPod []v1.Network, defaultNamespace string) ([]*types.NetworkSelectionElement, error) {	
+// plw changes here
+func parseNetworksFromPod(client *ClientInfo, namespace string, networksFromPod []v1.Network, defaultNamespace string) ([]*types.NetworkSelectionElement, error) {	
 	var networks []*types.NetworkSelectionElement
 
 	for _, n := range networksFromPod {
 		// plw - ignoring the default gateway stuff for now.
+		podNetworkName := ""
 		if n.PodNetworkName != "" {
-			logging.Errorf("Found pod network name: %s", n.PodNetworkName)
-
-			podNetwork, err := client.GetPodNetworkResource(n.PodNetworkName)
+			logging.Errorf("Found pod network name directly in pod: %s", n.PodNetworkName)
+			podNetworkName = n.PodNetworkName
+		} else if n.PodNetworkAttachmentName != "" {
+			logging.Errorf("Found PNA in pod: %s", n.PodNetworkAttachmentName)
+			podNetworkAttachment, err := client.GetPodNetworkAttachment(namespace, n.PodNetworkAttachmentName)
+			if err != nil {
+				return nil, err
+			}
+			podNetworkName = podNetworkAttachment.Spec.PodNetworkName
+			logging.Errorf("Found pod network name in PNA: %s", podNetworkName)
+			// plw - FIXME there could be parameters here in a CR, but we ignore them
+        }
+		
+		if podNetworkName != "" {
+			logging.Errorf("Reading PodNetwork: %s", podNetworkName)
+			podNetwork, err := client.GetPodNetworkResource(podNetworkName)
 			if err != nil {
 				return nil, err
 			}
 
-			// plw - FIXME; there is no validation here at all			
+			// plw - FIXME; there is no validation here at all (or above)
+			// plw - FIXME; only reading first CR from list
+			// plw - FIXME: should probably check provider field
 			networks = append(networks, &types.NetworkSelectionElement{
 				Name:             podNetwork.Spec.ParametersRefs[0].Name,
 				Namespace:        podNetwork.Spec.ParametersRefs[0].Namespace,
@@ -528,7 +549,7 @@ func GetPodNetwork(client *ClientInfo, pod *v1.Pod) ([]*types.NetworkSelectionEl
 	networksFromPod := pod.Spec.Networks
 	if networksFromPod != nil && len(networksFromPod) != 0 {
 		logging.Debugf("We have pod networks in the pod to parse")
-	    networks, err := parseNetworksFromPod(client, networksFromPod, defaultNamespace)
+	    networks, err := parseNetworksFromPod(client, defaultNamespace, networksFromPod, defaultNamespace)
 		if err != nil {
 			return nil, err
 		}
